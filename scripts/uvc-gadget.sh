@@ -109,6 +109,28 @@ create_uvc() {
 	ln -s header/h class/ss
 	cd ../../../
 
+	# Set PU bmControls.  The kernel UVC host driver uses its own bit ordering
+	# (not the UVC spec ordering), so the byte values are:
+	#   byte0 = 0x5B = 91: kernel indices 0,1,3,4,6
+	#     index 0=brightness, 1=contrast, 3=saturation,
+	#     4=sharpness, 6=WBtemp
+	#     (indices 2=hue and 5=gamma omitted: no RPi IPA handler)
+	#   byte1 = 0x14 = 20: kernel indices 10 and 12
+	#     index 10 (byte1 bit2) = PLF/power_line_frequency
+	#     index 12 (byte1 bit4) = WBTempAuto → V4L2_CID_AUTO_WHITE_BALANCE
+	# The kernel default bControlSize for PU is 2, so exactly two bytes.
+	PU_CTL="functions/$FUNCTION/control/processing/default/bmControls"
+	if [ -f "$PU_CTL" ]; then
+		printf '91\n20\n' > "$PU_CTL"
+	fi
+
+	# Enable CT AE Mode (bit1=2) + Exposure Time Absolute (bit3=8) = 10.
+	# CT bControlSize is 3, so write three bytes.
+	CT_CTL="functions/$FUNCTION/control/terminal/camera/default/bmControls"
+	if [ -f "$CT_CTL" ]; then
+		printf '10\n0\n0\n' > "$CT_CTL"
+	fi
+
 	# Include an Extension Unit if the kernel supports that
 	if [ -d functions/$FUNCTION/control/extensions ]; then
 		mkdir functions/$FUNCTION/control/extensions/xu.0
