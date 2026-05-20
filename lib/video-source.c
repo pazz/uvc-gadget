@@ -77,3 +77,11 @@ void video_source_fill_buffer(struct video_source *src,
 {
 	src->ops->fill_buffer(src, buf);
 }
+
+int video_source_set_camera_control(struct video_source *src,
+				    unsigned int control_cs, int value)
+{
+	if (!src->ops->set_camera_control)
+		return 0; /* silently ignore for sources without control support */
+	return src->ops->set_camera_control(src, control_cs, value);
+}

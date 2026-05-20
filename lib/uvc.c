@@ -12,6 +12,7 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/g_uvc.h>
 #include <linux/usb/video.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,34 @@ struct uvc_device
 	unsigned int fcc;
 	unsigned int width;
 	unsigned int height;
+
+	/* Processing Unit control tracking across SETUP → DATA phases */
+	unsigned int control_cs;     /* PU control selector, 0 = none pending */
+	unsigned int control_entity; /* entity ID from wIndex >> 8           */
+	short brightness_val;        /* current value tracked for GET_CUR    */
+	short contrast_val;
+	short saturation_val;
+	short sharpness_val;         /* forwarded as libcamera Sharpness     */
+	short wb_temp_val;           /* Kelvin; forwarded as ColourTemperature */
+	uint8_t wb_auto_val;         /* 0=manual, 1=auto; forwarded as AwbEnable */
+	uint8_t plf_val;             /* 0=off, 1=50 Hz, 2=60 Hz              */
+
+	/* Camera Terminal AE Mode and Exposure tracking */
+	short    ae_mode_val;        /* 1=manual, 2=auto (UVC AE Mode bitmask) */
+	uint32_t exposure_abs_val;   /* CT Exposure Time Absolute, 100µs units */
 };
+
+/*
+ * Virtual control ID for Camera Terminal AE Mode.  The UVC CT AE Mode
+ * control selector (0x02) conflicts with UVC PU Brightness (also 0x02);
+ * disambiguation is by entity_id in uvc.c.  A synthetic ID outside the
+ * normal 0x00–0x1F CS range is used when forwarding to the video source.
+ */
+#define UVC_CT_AE_MODE_CS          0x02
+#define UVC_CT_AE_MODE_VIRTUAL     0x100
+
+#define UVC_CT_EXPOSURE_ABS_CS     0x04
+#define UVC_CT_EXPOSURE_ABS_VIRTUAL 0x101
 
 static const char *uvc_request_names[] = {
 	[UVC_RC_UNDEFINED] = "UNDEFINED",
@@ -191,18 +219,272 @@ uvc_events_process_standard(struct uvc_device *dev,
 }
 
 static void
-uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs, uint8_t len,
+uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs,
+			   uint8_t entity_id, uint8_t len,
 			   struct uvc_request_data *resp)
 {
-	printf("control request (req %s cs %s)\n", uvc_request_name(req), pu_control_name(cs));
-	(void)dev;
+	short *cur;
+	short min_val, max_val, def_val;
+
+	printf("control request (req %s cs %s entity %u)\n",
+	       uvc_request_name(req), pu_control_name(cs), entity_id);
 
 	/*
-	 * Responding to controls is not currently implemented. As an interim
-	 * measure respond to say that both get and set operations are permitted.
+	 * Camera Terminal AE Mode (entity=1, CS=0x02) has the same CS value as
+	 * PU Brightness (entity=2, CS=0x02).  Handle CT first to avoid the
+	 * conflict, then fall through to the PU switch for everything else.
 	 */
-	resp->data[0] = 0x03;
-	resp->length = len;
+	if (entity_id == 1 && cs == UVC_CT_AE_MODE_CS) {
+		switch (req) {
+		case UVC_SET_CUR:
+			dev->control_cs     = cs;
+			dev->control_entity = entity_id;
+			resp->data[0] = 0;
+			resp->length  = len;
+			break;
+		case UVC_GET_CUR:
+			resp->data[0] = (uint8_t)dev->ae_mode_val;
+			resp->length  = 1;
+			break;
+		case UVC_GET_DEF:
+			resp->data[0] = 2; /* Auto mode */
+			resp->length  = 1;
+			break;
+		case UVC_GET_MIN:
+			resp->data[0] = 1; /* Manual */
+			resp->length  = 1;
+			break;
+		case UVC_GET_MAX:
+			resp->data[0] = 8; /* Aperture Priority */
+			resp->length  = 1;
+			break;
+		case UVC_GET_RES:
+			resp->data[0] = 3; /* Manual (bit0) + Auto (bit1) */
+			resp->length  = 1;
+			break;
+		case UVC_GET_INFO:
+			resp->data[0] = 0x03;
+			resp->length  = 1;
+			break;
+		default:
+			resp->length = -EL2HLT;
+			break;
+		}
+		return;
+	}
+
+	/* CT Exposure Time Absolute (entity=1, CS=0x04): 4-byte unsigned DWORD. */
+	if (entity_id == 1 && cs == UVC_CT_EXPOSURE_ABS_CS) {
+		uint32_t min_u = 1, max_u = 10000, def_u = 166, res_u = 1;
+		switch (req) {
+		case UVC_SET_CUR:
+			dev->control_cs     = cs;
+			dev->control_entity = entity_id;
+			resp->data[0] = 0;
+			resp->length  = len;
+			break;
+		case UVC_GET_CUR:
+			memcpy(resp->data, &dev->exposure_abs_val, 4);
+			resp->length = 4;
+			break;
+		case UVC_GET_MIN:
+			memcpy(resp->data, &min_u, 4);
+			resp->length = 4;
+			break;
+		case UVC_GET_MAX:
+			memcpy(resp->data, &max_u, 4);
+			resp->length = 4;
+			break;
+		case UVC_GET_DEF:
+			memcpy(resp->data, &def_u, 4);
+			resp->length = 4;
+			break;
+		case UVC_GET_RES:
+			memcpy(resp->data, &res_u, 4);
+			resp->length = 4;
+			break;
+		case UVC_GET_LEN: {
+			uint16_t l = 4;
+			memcpy(resp->data, &l, 2);
+			resp->length = 2;
+			break;
+		}
+		case UVC_GET_INFO:
+			resp->data[0] = 0x03;
+			resp->length  = 1;
+			break;
+		default:
+			resp->length = -EL2HLT;
+			break;
+		}
+		return;
+	}
+
+	/*
+	 * PU Power Line Frequency (CS=UVC_PU_POWER_LINE_FREQUENCY_CONTROL):
+	 * 1-byte menu; 0=disabled, 1=50 Hz, 2=60 Hz.
+	 * Handle before the generic 2-byte PU switch.
+	 */
+	if (entity_id == 2 && cs == UVC_PU_POWER_LINE_FREQUENCY_CONTROL) {
+		switch (req) {
+		case UVC_SET_CUR:
+			dev->control_cs     = cs;
+			dev->control_entity = entity_id;
+			resp->data[0] = 0;
+			resp->length  = len;
+			break;
+		case UVC_GET_CUR:
+			resp->data[0] = dev->plf_val;
+			resp->length  = 1;
+			break;
+		case UVC_GET_DEF:
+			resp->data[0] = 0; /* default: disabled */
+			resp->length  = 1;
+			break;
+		case UVC_GET_MIN:
+			resp->data[0] = 0;
+			resp->length  = 1;
+			break;
+		case UVC_GET_MAX:
+			resp->data[0] = 2;
+			resp->length  = 1;
+			break;
+		case UVC_GET_RES:
+			resp->data[0] = 1;
+			resp->length  = 1;
+			break;
+		case UVC_GET_LEN: {
+			uint16_t l = 1;
+			memcpy(resp->data, &l, 2);
+			resp->length = 2;
+			break;
+		}
+		case UVC_GET_INFO:
+			resp->data[0] = 0x03;
+			resp->length  = 1;
+			break;
+		default:
+			resp->length = -EL2HLT;
+			break;
+		}
+		return;
+	}
+
+	/*
+	 * PU White Balance Temperature Auto (CS=0x0B) is a 1-byte boolean.
+	 * Handle it before the 2-byte PU switch.
+	 */
+	if (entity_id == 2 && cs == UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL) {
+		switch (req) {
+		case UVC_SET_CUR:
+			dev->control_cs     = cs;
+			dev->control_entity = entity_id;
+			resp->data[0] = 0;
+			resp->length  = len;
+			break;
+		case UVC_GET_CUR:
+			resp->data[0] = dev->wb_auto_val;
+			resp->length  = 1;
+			break;
+		case UVC_GET_DEF:
+			resp->data[0] = 1; /* default: auto */
+			resp->length  = 1;
+			break;
+		case UVC_GET_MIN:
+			resp->data[0] = 0;
+			resp->length  = 1;
+			break;
+		case UVC_GET_MAX:
+			resp->data[0] = 1;
+			resp->length  = 1;
+			break;
+		case UVC_GET_RES:
+			resp->data[0] = 1;
+			resp->length  = 1;
+			break;
+		case UVC_GET_LEN: {
+			uint16_t l = 1;
+			memcpy(resp->data, &l, 2);
+			resp->length = 2;
+			break;
+		}
+		case UVC_GET_INFO:
+			resp->data[0] = 0x03;
+			resp->length  = 1;
+			break;
+		default:
+			resp->length = -EL2HLT;
+			break;
+		}
+		return;
+	}
+
+	switch (cs) {
+	case UVC_PU_BRIGHTNESS_CONTROL:
+		cur = &dev->brightness_val;
+		min_val = 0; max_val = 255; def_val = 127;
+		break;
+	case UVC_PU_CONTRAST_CONTROL:
+		cur = &dev->contrast_val;
+		min_val = 0; max_val = 255; def_val = 127;
+		break;
+	case UVC_PU_SATURATION_CONTROL:
+		cur = &dev->saturation_val;
+		min_val = 0; max_val = 255; def_val = 127;
+		break;
+	case UVC_PU_SHARPNESS_CONTROL:
+		cur = &dev->sharpness_val;
+		/* UVC 16 maps to libcamera 1.0 via value * 16.0 / 255.0 */
+		min_val = 0; max_val = 255; def_val = 16;
+		break;
+	case UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL:
+		cur = &dev->wb_temp_val;
+		min_val = 2800; max_val = 6500; def_val = 4000;
+		break;
+	default:
+		/* Unknown control: acknowledge as GET+SET capable. */
+		resp->data[0] = (req == UVC_GET_INFO) ? 0x03 : 0;
+		resp->length  = (req == UVC_GET_INFO) ? 1    : len;
+		return;
+	}
+
+	switch (req) {
+	case UVC_SET_CUR:
+		dev->control_cs     = cs;
+		dev->control_entity = entity_id;
+		resp->data[0] = 0;
+		resp->length  = len;
+		break;
+	case UVC_GET_CUR:
+		memcpy(resp->data, cur, sizeof(*cur));
+		resp->length = sizeof(*cur);
+		break;
+	case UVC_GET_MIN:
+		memcpy(resp->data, &min_val, sizeof(min_val));
+		resp->length = sizeof(min_val);
+		break;
+	case UVC_GET_MAX:
+		memcpy(resp->data, &max_val, sizeof(max_val));
+		resp->length = sizeof(max_val);
+		break;
+	case UVC_GET_DEF:
+		memcpy(resp->data, &def_val, sizeof(def_val));
+		resp->length = sizeof(def_val);
+		break;
+	case UVC_GET_RES: {
+		short res = 1;
+		memcpy(resp->data, &res, sizeof(res));
+		resp->length = sizeof(res);
+		break;
+	}
+	case UVC_GET_INFO:
+		resp->data[0] = 0x03; /* GET + SET supported */
+		resp->length  = 1;
+		break;
+	default:
+		resp->length = -EL2HLT;
+		break;
+	}
 }
 
 static void
@@ -269,7 +551,8 @@ uvc_events_process_class(struct uvc_device *dev,
 		return;
 
 	if (interface == dev->fc->control.intf.bInterfaceNumber)
-		uvc_events_process_control(dev, ctrl->bRequest, ctrl->wValue >> 8, ctrl->wLength, resp);
+		uvc_events_process_control(dev, ctrl->bRequest, ctrl->wValue >> 8,
+					   ctrl->wIndex >> 8, ctrl->wLength, resp);
 	else if (interface == dev->fc->streaming.intf.bInterfaceNumber)
 		uvc_events_process_streaming(dev, ctrl->bRequest, ctrl->wValue >> 8, resp);
 }
@@ -280,6 +563,7 @@ uvc_events_process_setup(struct uvc_device *dev,
 			 struct uvc_request_data *resp)
 {
 	dev->control = 0;
+	dev->control_cs = 0;
 
 	printf("bRequestType %02x bRequest %02x wValue %04x wIndex %04x "
 		"wLength %04x\n", ctrl->bRequestType, ctrl->bRequest,
@@ -319,7 +603,92 @@ uvc_events_process_data(struct uvc_device *dev,
 		break;
 
 	default:
-		printf("setting unknown control, length = %d\n", data->length);
+		if (dev->control_cs) {
+			/*
+			 * Read up to 4 bytes from the host.  Controls have
+			 * different widths: 1-byte (WBauto), 2-byte (most PU),
+			 * 4-byte (CT exposure time).  We zero-extend and narrow
+			 * per-control below.
+			 */
+			uint32_t raw = 0;
+			size_t copy_len = (size_t)data->length < sizeof(raw)
+					  ? (size_t)data->length : sizeof(raw);
+			memcpy(&raw, data->data, copy_len);
+
+			if (dev->control_entity == 2) {
+				/* Processing Unit controls */
+				switch (dev->control_cs) {
+				case UVC_PU_BRIGHTNESS_CONTROL:
+					dev->brightness_val = (short)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_BRIGHTNESS_CONTROL,
+								      (int)(short)raw);
+					break;
+				case UVC_PU_CONTRAST_CONTROL:
+					dev->contrast_val = (short)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_CONTRAST_CONTROL,
+								      (int)(uint16_t)raw);
+					break;
+				case UVC_PU_SATURATION_CONTROL:
+					dev->saturation_val = (short)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_SATURATION_CONTROL,
+								      (int)(uint16_t)raw);
+					break;
+				case UVC_PU_SHARPNESS_CONTROL:
+					dev->sharpness_val = (short)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_SHARPNESS_CONTROL,
+								      (int)(uint16_t)raw);
+					break;
+				case UVC_PU_POWER_LINE_FREQUENCY_CONTROL:
+					dev->plf_val = (uint8_t)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_POWER_LINE_FREQUENCY_CONTROL,
+								      (int)(uint8_t)raw);
+					break;
+				case UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL:
+					dev->wb_temp_val = (short)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL,
+								      (int)(uint16_t)raw);
+					break;
+				case UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL:
+					dev->wb_auto_val = (uint8_t)raw;
+					uvc_stream_set_camera_control(dev->stream,
+								      UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL,
+								      (int)(uint8_t)raw);
+					break;
+				default:
+					printf("unknown PU control cs=%u\n",
+					       dev->control_cs);
+					break;
+				}
+			} else if (dev->control_entity == 1 &&
+				   dev->control_cs == UVC_CT_AE_MODE_CS) {
+				/* Camera Terminal AE Mode */
+				dev->ae_mode_val = (short)(uint8_t)raw;
+				uvc_stream_set_camera_control(dev->stream,
+							      UVC_CT_AE_MODE_VIRTUAL,
+							      (int)(uint8_t)raw);
+			} else if (dev->control_entity == 1 &&
+				   dev->control_cs == UVC_CT_EXPOSURE_ABS_CS) {
+				/* Camera Terminal Exposure Time Absolute (4-byte) */
+				dev->exposure_abs_val = raw;
+				/* Convert 100µs UVC units to µs for libcamera */
+				uvc_stream_set_camera_control(dev->stream,
+							      UVC_CT_EXPOSURE_ABS_VIRTUAL,
+							      (int)(raw * 100u));
+			} else {
+				printf("unknown control entity=%u cs=%u\n",
+				       dev->control_entity, dev->control_cs);
+			}
+			dev->control_cs = 0;
+		} else {
+			printf("setting unknown control, length = %d\n",
+			       data->length);
+		}
 		return;
 	}
 
@@ -414,6 +783,19 @@ void uvc_events_init(struct uvc_device *dev, struct events *events)
 	/* Default to the minimum values. */
 	uvc_fill_streaming_control(dev, &dev->probe, 1, 1, 0);
 	uvc_fill_streaming_control(dev, &dev->commit, 1, 1, 0);
+
+	/* Default PU control values — match libcamera's neutral starting point. */
+	dev->brightness_val = 127;   /* UVC 127 → libcamera ~0.0 (neutral) */
+	dev->contrast_val   = 127;   /* UVC 127 → libcamera ~1.0 (neutral) */
+	dev->saturation_val = 127;   /* UVC 127 → libcamera ~1.0 (neutral) */
+	dev->sharpness_val  = 16;    /* UVC 16  → libcamera  1.0 (neutral) */
+	dev->wb_temp_val    = 4000;  /* 4000 K (neutral daylight) */
+	dev->wb_auto_val    = 1;    /* auto white balance */
+	dev->plf_val        = 0;    /* power line frequency: disabled */
+
+	/* Default CT values. */
+	dev->ae_mode_val     = 2;   /* Auto mode */
+	dev->exposure_abs_val = 166; /* ~16.6ms in 100µs units */
 
 	memset(&sub, 0, sizeof sub);
 	sub.type = UVC_EVENT_SETUP;

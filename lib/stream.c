@@ -338,6 +338,14 @@ int uvc_stream_set_frame_rate(struct uvc_stream *stream, unsigned int fps)
 	return video_source_set_frame_rate(stream->src, fps);
 }
 
+int uvc_stream_set_camera_control(struct uvc_stream *stream,
+				  unsigned int control_cs, int value)
+{
+	if (!stream->src)
+		return -EINVAL;
+	return video_source_set_camera_control(stream->src, control_cs, value);
+}
+
 void uvc_stream_set_frozen(void *s, int state)
 {
 	struct uvc_stream *stream = s;

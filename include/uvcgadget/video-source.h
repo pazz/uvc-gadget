@@ -29,6 +29,8 @@ struct video_source_ops {
 	int(*stream_off)(struct video_source *src);
 	int(*queue_buffer)(struct video_source *src, struct video_buffer *buf);
 	void(*fill_buffer)(struct video_source *src, struct video_buffer *buf);
+	int(*set_camera_control)(struct video_source *src,
+				 unsigned int control_cs, int value);
 };
 
 typedef void(*video_source_buffer_handler_t)(void *, struct video_source *,
@@ -74,5 +76,7 @@ int video_source_queue_buffer(struct video_source *src,
 			      struct video_buffer *buf);
 void video_source_fill_buffer(struct video_source *src,
 			      struct video_buffer *buf);
+int video_source_set_camera_control(struct video_source *src,
+				    unsigned int control_cs, int value);
 
 #endif /* __VIDEO_SOURCE_H__ */

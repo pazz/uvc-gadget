@@ -35,6 +35,24 @@ extern "C" {
 using namespace libcamera;
 using namespace std::placeholders;
 
+/*
+ * UVC Processing Unit control selectors (from linux/usb/video.h).
+ * Defined here to avoid a kernel-header dependency in a C++ source file.
+ */
+#ifndef UVC_PU_BRIGHTNESS_CONTROL
+#define UVC_PU_BRIGHTNESS_CONTROL	0x02
+#define UVC_PU_CONTRAST_CONTROL		0x03
+#define UVC_PU_POWER_LINE_FREQUENCY_CONTROL 0x05
+#define UVC_PU_SATURATION_CONTROL	0x07
+#define UVC_PU_SHARPNESS_CONTROL	0x08
+#define UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL      0x0A
+#define UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL 0x0B
+#endif
+
+/* Virtual IDs for Camera Terminal controls — see uvc.c for rationale. */
+#define UVC_CT_AE_MODE_VIRTUAL		0x100
+#define UVC_CT_EXPOSURE_ABS_VIRTUAL	0x101
+
 #define to_libcamera_source(s) container_of(s, struct libcamera_source, src)
 
 struct libcamera_source {
@@ -49,6 +67,17 @@ struct libcamera_source {
 	std::vector<std::unique_ptr<Request>> requests;
 	std::queue<Request *> completed_requests;
 	int pfds[2];
+
+	/* Camera controls set by the host via UVC SET_CUR. */
+	float uvc_brightness;   /* libcamera Brightness: -1.0 .. 1.0 */
+	float uvc_contrast;     /* libcamera Contrast:    0.0 .. 2.0 */
+	float uvc_saturation;   /* libcamera Saturation:  0.0 .. 2.0 */
+	float uvc_sharpness;    /* libcamera Sharpness:   0.0 .. 16.0 */
+	int   uvc_ae_mode;      /* UVC AE Mode bitmask: 1=manual 2=auto */
+	int   uvc_wb_temp;      /* Kelvin for ColourTemperature */
+	int   uvc_wb_auto;      /* 0=manual, 1=auto (AwbEnable) */
+	int   uvc_exposure_us;  /* libcamera ExposureTime in µs */
+	int   power_line_freq;  /* 0=off, 1=50Hz, 2=60Hz */
 
 	MjpegEncoder *encoder;
 	std::unordered_map<FrameBuffer *, Span<uint8_t>> mapped_buffers_;
@@ -436,10 +465,110 @@ static int libcamera_source_queue_buffer(struct video_source *s,
 	for (std::unique_ptr<Request> &r : src->requests) {
 		if (r->cookie() == buf->index) {
 			r->reuse(Request::ReuseBuffers);
+
+			/* Apply camera controls from the host (always set, default from init). */
+			r->controls().set(controls::Brightness, src->uvc_brightness);
+			r->controls().set(controls::Contrast,   src->uvc_contrast);
+			r->controls().set(controls::Saturation, src->uvc_saturation);
+			r->controls().set(controls::Sharpness,  src->uvc_sharpness);
+			/*
+			 * Power Line Frequency: map to AeFlickerMode.
+			 * 0=off → FlickerOff; 1=50Hz / 2=60Hz → FlickerManual
+			 * with the corresponding half-cycle period.
+			 */
+			if (src->power_line_freq == 0) {
+				r->controls().set(controls::AeFlickerMode,
+						  (int32_t)controls::FlickerOff);
+			} else {
+				int32_t period = (src->power_line_freq == 1)
+					? 10000   /* 50 Hz → 10 ms */
+					: 8333;   /* 60 Hz → 8.333 ms */
+				r->controls().set(controls::AeFlickerMode,
+						  (int32_t)controls::FlickerManual);
+				r->controls().set(controls::AeFlickerPeriod, period);
+			}
+			/*
+			 * The RPi IPA ignores AeEnable; use ExposureTimeMode
+			 * and AnalogueGainMode to switch auto/manual AE.
+			 */
+			{
+				int32_t etm = (src->uvc_ae_mode == 1)
+					? (int32_t)controls::ExposureTimeModeManual
+					: (int32_t)controls::ExposureTimeModeAuto;
+				int32_t agm = (src->uvc_ae_mode == 1)
+					? (int32_t)controls::AnalogueGainModeManual
+					: (int32_t)controls::AnalogueGainModeAuto;
+				r->controls().set(controls::ExposureTimeMode, etm);
+				r->controls().set(controls::AnalogueGainMode, agm);
+			}
+			r->controls().set(controls::AwbEnable, src->uvc_wb_auto != 0);
+			/*
+			 * Apply ColourTemperature only when WB is in manual mode.
+			 * Apply ExposureTime only when AE is in manual mode;
+			 * must come after ExposureTimeMode so the IPA sees the
+			 * mode change first.
+			 */
+			if (src->uvc_wb_auto == 0)
+				r->controls().set(controls::ColourTemperature,
+						  src->uvc_wb_temp);
+			if (src->uvc_ae_mode == 1)
+				r->controls().set(controls::ExposureTime,
+						  src->uvc_exposure_us);
+
 			src->camera->queueRequest(r.get());
 
 			break;
 		}
+	}
+
+	return 0;
+}
+
+static int libcamera_source_set_camera_control(struct video_source *s,
+					       unsigned int control_cs,
+					       int value)
+{
+	struct libcamera_source *src = to_libcamera_source(s);
+
+	switch (control_cs) {
+	case UVC_PU_BRIGHTNESS_CONTROL:
+		/* UVC 0-255 (neutral 128) → libcamera -1.0..1.0 */
+		src->uvc_brightness = (value - 127.5f) / 127.5f;
+		break;
+	case UVC_PU_CONTRAST_CONTROL:
+		/* UVC 0-255 → libcamera 0..2 */
+		src->uvc_contrast = value / 127.5f;
+		break;
+	case UVC_PU_SATURATION_CONTROL:
+		/* UVC 0-255 → libcamera 0..2 */
+		src->uvc_saturation = value / 127.5f;
+		break;
+	case UVC_PU_SHARPNESS_CONTROL:
+		/* UVC 0-255 → libcamera 0..16 */
+		src->uvc_sharpness = value * 16.0f / 255.0f;
+		break;
+	case UVC_PU_POWER_LINE_FREQUENCY_CONTROL:
+		/* 0=off, 1=50Hz, 2=60Hz */
+		src->power_line_freq = value;
+		break;
+	case UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL:
+		/* UVC 2800-6500 K directly usable as Kelvin */
+		src->uvc_wb_temp = value;
+		break;
+	case UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL:
+		/* 0=manual, 1=auto */
+		src->uvc_wb_auto = value ? 1 : 0;
+		break;
+	case UVC_CT_AE_MODE_VIRTUAL:
+		/* UVC AE Mode bitmask: 1 = Manual (AE off), 2+ = Auto (AE on). */
+		src->uvc_ae_mode = value;
+		break;
+	case UVC_CT_EXPOSURE_ABS_VIRTUAL:
+		/* Value already in µs (converted from 100µs UVC units in uvc.c). */
+		src->uvc_exposure_us = value;
+		break;
+	default:
+		return -EINVAL;
 	}
 
 	return 0;
@@ -457,6 +586,7 @@ static const struct video_source_ops libcamera_source_ops = {
 	.stream_off = libcamera_source_stream_off,
 	.queue_buffer = libcamera_source_queue_buffer,
 	.fill_buffer = NULL,
+	.set_camera_control = libcamera_source_set_camera_control,
 };
 
 std::string cameraName(Camera *camera)
@@ -515,6 +645,17 @@ struct video_source *libcamera_source_create(const char *devname)
 
 	src->src.ops = &libcamera_source_ops;
 	src->src.type = VIDEO_SOURCE_DMABUF;
+
+	/* Defaults — match libcamera's own neutral starting point. */
+	src->uvc_brightness   = 0.0f;   /* libcamera default: 0.0 (neutral) */
+	src->uvc_contrast     = 1.0f;   /* libcamera default: 1.0 (neutral) */
+	src->uvc_saturation   = 1.0f;   /* libcamera default: 1.0 (neutral) */
+	src->uvc_sharpness    = 1.0f;   /* libcamera default: 1.0 (neutral) */
+	src->uvc_ae_mode      = 2;      /* Auto exposure */
+	src->uvc_wb_auto      = 1;      /* Auto white balance */
+	src->uvc_wb_temp      = 4000;   /* K (used when WB switches to manual) */
+	src->uvc_exposure_us  = 20000;  /* 20 ms (used when AE switches to manual) */
+	src->power_line_freq  = 0;      /* disabled */
 
 	src->cm = std::make_unique<CameraManager>();
 	src->cm->start();

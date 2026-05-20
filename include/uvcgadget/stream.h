@@ -119,4 +119,13 @@ void uvc_stream_set_frozen(void *s, int state);
 
 void uvc_stream_set_gpio_callback(struct uvc_stream *stream, uvc_stream_gpio_cb_t cb, void *ud);
 
+/*
+ * uvc_stream_set_camera_control - Forward a UVC PU control to the video source
+ * @stream:     the UVC stream
+ * @control_cs: UVC Processing Unit control selector (UVC_PU_*_CONTROL)
+ * @value:      control value as received from the host (16-bit signed integer)
+ */
+int uvc_stream_set_camera_control(struct uvc_stream *stream,
+				  unsigned int control_cs, int value);
+
 #endif /* __STREAM_H__ */
