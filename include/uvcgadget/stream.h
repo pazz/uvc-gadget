@@ -120,10 +120,14 @@ void uvc_stream_set_frozen(void *s, int state);
 void uvc_stream_set_gpio_callback(struct uvc_stream *stream, uvc_stream_gpio_cb_t cb, void *ud);
 
 /*
- * uvc_stream_set_camera_control - Forward a UVC PU control to the video source
+ * uvc_stream_set_camera_control - Forward a UVC control to the video source
  * @stream:     the UVC stream
- * @control_cs: UVC Processing Unit control selector (UVC_PU_*_CONTROL)
- * @value:      control value as received from the host (16-bit signed integer)
+ * @control_cs: control selector — either a UVC_PU_*_CONTROL value for
+ *              Processing Unit controls or a virtual CT selector
+ *              (UVC_CT_AE_MODE_VIRTUAL / UVC_CT_EXPOSURE_ABS_VIRTUAL)
+ *              for Camera Terminal controls that share a CS with PU controls
+ * @value:      control value; width varies by control (1-byte booleans/enums,
+ *              2-byte scalars, or CT exposure time pre-converted to µs)
  */
 int uvc_stream_set_camera_control(struct uvc_stream *stream,
 				  unsigned int control_cs, int value);
