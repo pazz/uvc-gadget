@@ -466,52 +466,64 @@ static int libcamera_source_queue_buffer(struct video_source *s,
 		if (r->cookie() == buf->index) {
 			r->reuse(Request::ReuseBuffers);
 
-			/* Apply camera controls from the host (always set, default from init). */
-			r->controls().set(controls::Brightness, src->uvc_brightness);
-			r->controls().set(controls::Contrast,   src->uvc_contrast);
-			r->controls().set(controls::Saturation, src->uvc_saturation);
-			r->controls().set(controls::Sharpness,  src->uvc_sharpness);
+			const ControlInfoMap &infoMap = src->camera->controls();
+
+			/* Apply only controls the camera/IPA actually supports. */
+			if (infoMap.count(&controls::Brightness))
+				r->controls().set(controls::Brightness, src->uvc_brightness);
+			if (infoMap.count(&controls::Contrast))
+				r->controls().set(controls::Contrast,   src->uvc_contrast);
+			if (infoMap.count(&controls::Saturation))
+				r->controls().set(controls::Saturation, src->uvc_saturation);
+			if (infoMap.count(&controls::Sharpness))
+				r->controls().set(controls::Sharpness,  src->uvc_sharpness);
 			/*
 			 * Power Line Frequency: map to AeFlickerMode.
 			 * 0=off → FlickerOff; 1=50Hz / 2=60Hz → FlickerManual
 			 * with the corresponding half-cycle period.
 			 */
-			if (src->power_line_freq == 0) {
-				r->controls().set(controls::AeFlickerMode,
-						  (int32_t)controls::FlickerOff);
-			} else {
-				int32_t period = (src->power_line_freq == 1)
-					? 10000   /* 50 Hz → 10 ms */
-					: 8333;   /* 60 Hz → 8.333 ms */
-				r->controls().set(controls::AeFlickerMode,
-						  (int32_t)controls::FlickerManual);
-				r->controls().set(controls::AeFlickerPeriod, period);
+			if (infoMap.count(&controls::AeFlickerMode)) {
+				if (src->power_line_freq == 0) {
+					r->controls().set(controls::AeFlickerMode,
+							  (int32_t)controls::FlickerOff);
+				} else {
+					int32_t period = (src->power_line_freq == 1)
+						? 10000   /* 50 Hz → 10 ms */
+						: 8333;   /* 60 Hz → 8.333 ms */
+					r->controls().set(controls::AeFlickerMode,
+							  (int32_t)controls::FlickerManual);
+					if (infoMap.count(&controls::AeFlickerPeriod))
+						r->controls().set(controls::AeFlickerPeriod, period);
+				}
 			}
 			/*
 			 * The RPi IPA ignores AeEnable; use ExposureTimeMode
 			 * and AnalogueGainMode to switch auto/manual AE.
 			 */
-			{
+			if (infoMap.count(&controls::ExposureTimeMode)) {
 				int32_t etm = (src->uvc_ae_mode == 1)
 					? (int32_t)controls::ExposureTimeModeManual
 					: (int32_t)controls::ExposureTimeModeAuto;
+				r->controls().set(controls::ExposureTimeMode, etm);
+			}
+			if (infoMap.count(&controls::AnalogueGainMode)) {
 				int32_t agm = (src->uvc_ae_mode == 1)
 					? (int32_t)controls::AnalogueGainModeManual
 					: (int32_t)controls::AnalogueGainModeAuto;
-				r->controls().set(controls::ExposureTimeMode, etm);
 				r->controls().set(controls::AnalogueGainMode, agm);
 			}
-			r->controls().set(controls::AwbEnable, src->uvc_wb_auto != 0);
+			if (infoMap.count(&controls::AwbEnable))
+				r->controls().set(controls::AwbEnable, src->uvc_wb_auto != 0);
 			/*
 			 * Apply ColourTemperature only when WB is in manual mode.
 			 * Apply ExposureTime only when AE is in manual mode;
 			 * must come after ExposureTimeMode so the IPA sees the
 			 * mode change first.
 			 */
-			if (src->uvc_wb_auto == 0)
+			if (src->uvc_wb_auto == 0 && infoMap.count(&controls::ColourTemperature))
 				r->controls().set(controls::ColourTemperature,
 						  src->uvc_wb_temp);
-			if (src->uvc_ae_mode == 1)
+			if (src->uvc_ae_mode == 1 && infoMap.count(&controls::ExposureTime))
 				r->controls().set(controls::ExposureTime,
 						  src->uvc_exposure_us);
 
