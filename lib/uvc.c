@@ -639,46 +639,46 @@ uvc_events_process_data(struct uvc_device *dev,
 				/* Processing Unit controls */
 				switch (dev->control_cs) {
 				case UVC_PU_BRIGHTNESS_CONTROL:
-					dev->brightness_val = (short)raw;
+					dev->brightness_val = clamp_t(short, (short)raw, 0, 255);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_BRIGHTNESS_CONTROL,
-								      (int)(short)raw);
+								      (int)dev->brightness_val);
 					break;
 				case UVC_PU_CONTRAST_CONTROL:
-					dev->contrast_val = (short)raw;
+					dev->contrast_val = clamp_t(short, (short)(uint16_t)raw, 0, 255);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_CONTRAST_CONTROL,
-								      (int)(uint16_t)raw);
+								      (int)dev->contrast_val);
 					break;
 				case UVC_PU_SATURATION_CONTROL:
-					dev->saturation_val = (short)raw;
+					dev->saturation_val = clamp_t(short, (short)(uint16_t)raw, 0, 255);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_SATURATION_CONTROL,
-								      (int)(uint16_t)raw);
+								      (int)dev->saturation_val);
 					break;
 				case UVC_PU_SHARPNESS_CONTROL:
-					dev->sharpness_val = (short)raw;
+					dev->sharpness_val = clamp_t(short, (short)(uint16_t)raw, 0, 255);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_SHARPNESS_CONTROL,
-								      (int)(uint16_t)raw);
+								      (int)dev->sharpness_val);
 					break;
 				case UVC_PU_POWER_LINE_FREQUENCY_CONTROL:
-					dev->plf_val = (uint8_t)raw;
+					dev->plf_val = clamp_t(uint8_t, (uint8_t)raw, 0, 2);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_POWER_LINE_FREQUENCY_CONTROL,
-								      (int)(uint8_t)raw);
+								      (int)dev->plf_val);
 					break;
 				case UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL:
-					dev->wb_temp_val = (short)raw;
+					dev->wb_temp_val = clamp_t(short, (short)(uint16_t)raw, 2800, 6500);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL,
-								      (int)(uint16_t)raw);
+								      (int)dev->wb_temp_val);
 					break;
 				case UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL:
-					dev->wb_auto_val = (uint8_t)raw;
+					dev->wb_auto_val = clamp_t(uint8_t, (uint8_t)raw, 0, 1);
 					uvc_stream_set_camera_control(dev->stream,
 								      UVC_PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL,
-								      (int)(uint8_t)raw);
+								      (int)dev->wb_auto_val);
 					break;
 				default:
 					printf("unknown PU control cs=%u\n",
@@ -687,19 +687,19 @@ uvc_events_process_data(struct uvc_device *dev,
 				}
 			} else if (dev->control_entity == 1 &&
 				   dev->control_cs == UVC_CT_AE_MODE_CS) {
-				/* Camera Terminal AE Mode */
-				dev->ae_mode_val = (short)(uint8_t)raw;
+				/* Camera Terminal AE Mode: clamp to advertised GET_RES bitmask. */
+				dev->ae_mode_val = clamp_t(short, (short)(uint8_t)raw, 1, 3);
 				uvc_stream_set_camera_control(dev->stream,
 							      UVC_CT_AE_MODE_VIRTUAL,
-							      (int)(uint8_t)raw);
+							      (int)dev->ae_mode_val);
 			} else if (dev->control_entity == 1 &&
 				   dev->control_cs == UVC_CT_EXPOSURE_ABS_CS) {
 				/* Camera Terminal Exposure Time Absolute (4-byte) */
-				dev->exposure_abs_val = raw;
+				dev->exposure_abs_val = clamp_t(uint32_t, raw, 1, 10000);
 				/* Convert 100µs UVC units to µs for libcamera */
 				uvc_stream_set_camera_control(dev->stream,
 							      UVC_CT_EXPOSURE_ABS_VIRTUAL,
-							      (int)(raw * 100u));
+							      (int)(dev->exposure_abs_val * 100u));
 			} else {
 				printf("unknown control entity=%u cs=%u\n",
 				       dev->control_entity, dev->control_cs);
