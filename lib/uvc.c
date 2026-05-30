@@ -255,7 +255,10 @@ uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs,
 			resp->length  = 1;
 			break;
 		case UVC_GET_MAX:
-			resp->data[0] = 8; /* Aperture Priority */
+			/* For AE Mode (bitmask), GET_MAX == GET_RES: the set of
+			 * supported modes.  Update both together if adding relay
+			 * support for shutter/aperture priority (bits 2/3). */
+			resp->data[0] = 3; /* Manual (bit0) + Auto (bit1) */
 			resp->length  = 1;
 			break;
 		case UVC_GET_RES:
