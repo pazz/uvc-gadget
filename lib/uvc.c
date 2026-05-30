@@ -119,6 +119,15 @@ static const char *pu_control_name(uint8_t cs)
         return "UNKNOWN";
 }
 
+static const char *ct_control_name(uint8_t cs)
+{
+	switch (cs) {
+	case UVC_CT_AE_MODE_CS:        return "AE_MODE";
+	case UVC_CT_EXPOSURE_ABS_CS:   return "EXPOSURE_TIME_ABSOLUTE";
+	default:                        return "UNKNOWN";
+	}
+}
+
 struct uvc_device *uvc_open(const char *devname, struct uvc_stream *stream)
 {
 	struct uvc_device *dev;
@@ -227,7 +236,9 @@ uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs,
 	short min_val, max_val, def_val;
 
 	printf("control request (req %s cs %s entity %u)\n",
-	       uvc_request_name(req), pu_control_name(cs), entity_id);
+	       uvc_request_name(req),
+	       entity_id == 1 ? ct_control_name(cs) : pu_control_name(cs),
+	       entity_id);
 
 	/*
 	 * Camera Terminal AE Mode (entity=1, CS=0x02) has the same CS value as
