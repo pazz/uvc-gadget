@@ -491,6 +491,12 @@ uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs,
 		resp->length = sizeof(res);
 		break;
 	}
+	case UVC_GET_LEN: {
+		uint16_t l = sizeof(*cur); /* 2 bytes for all generic PU controls */
+		memcpy(resp->data, &l, 2);
+		resp->length = 2;
+		break;
+	}
 	case UVC_GET_INFO:
 		resp->data[0] = 0x03; /* GET + SET supported */
 		resp->length  = 1;
